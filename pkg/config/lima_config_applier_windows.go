@@ -1,0 +1,46 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package config
+
+import (
+	"fmt"
+
+	"github.com/lima-vm/lima/v2/pkg/limatype"
+	"github.com/xorcare/pointer"
+
+	"github.com/runfinch/finch/pkg/flog"
+)
+
+func (lca *limaConfigApplier) configureVirtualizationFramework(limaCfg *limatype.LimaYAML, _ flog.Logger) (*limatype.LimaYAML, error) {
+	// Check if system supports wsl2
+
+	if err := SupportsWSL2(lca.cmdCreator); err != nil {
+		return nil, fmt.Errorf("wsl2 is not supported by your system %w", err)
+	}
+	if *lca.cfg.VMType == "wsl2" {
+		limaCfg.MountType = pointer.String("wsl2")
+		limaCfg.VMType = lca.cfg.VMType
+	} else {
+		return nil, fmt.Errorf("unsupported vm type \"%s\" for windows", *lca.cfg.VMType)
+	}
+	return limaCfg, nil
+}
+
+func (lca *limaConfigApplier) configureCPUs(limaCfg *limatype.LimaYAML) *limatype.LimaYAML {
+	return limaCfg
+}
+
+func (lca *limaConfigApplier) configureMemory(limaCfg *limatype.LimaYAML) *limatype.LimaYAML {
+	return limaCfg
+}
+
+func (lca *limaConfigApplier) configureMounts(limaCfg *limatype.LimaYAML) *limatype.LimaYAML {
+	return limaCfg
+}
+
+func (lca *limaConfigApplier) configureDisk(limaCfg *limatype.LimaYAML) *limatype.LimaYAML {
+	return limaCfg
+}

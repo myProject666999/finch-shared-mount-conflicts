@@ -1,0 +1,119 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build darwin || windows
+
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/runfinch/finch/pkg/command"
+	credserver "github.com/runfinch/finch/pkg/credserver"
+	"github.com/runfinch/finch/pkg/disk"
+	"github.com/runfinch/finch/pkg/flog"
+	"github.com/runfinch/finch/pkg/lima"
+
+	"github.com/spf13/cobra"
+)
+
+func newRemoveVMCommand(limaCmdCreator command.NerdctlCmdCreator, diskManager disk.UserDataDiskManager, logger flog.Logger) *cobra.Command {
+	removeVMCommand := &cobra.Command{
+		Use:   "remove",
+		Short: "Remove the virtual machine instance",
+		RunE:  newRemoveVMAction(limaCmdCreator, diskManager, logger).runAdapter,
+	}
+
+	removeVMCommand.Flags().BoolP("force", "f", false, "forcibly remove finch VM")
+
+	return removeVMCommand
+}
+
+type removeVMAction struct {
+	creator     command.NerdctlCmdCreator
+	logger      flog.Logger
+	diskManager disk.UserDataDiskManager
+}
+
+func newRemoveVMAction(creator command.NerdctlCmdCreator, diskManager disk.UserDataDiskManager, logger flog.Logger) *removeVMAction {
+	return &removeVMAction{creator: creator, logger: logger, diskManager: diskManager}
+}
+
+func (rva *removeVMAction) runAdapter(cmd *cobra.Command, _ []string) error {
+	force, err := cmd.Flags().GetBool("force")
+	if err != nil {
+		return err
+	}
+	return rva.run(force)
+}
+
+func (rva *removeVMAction) run(force bool) error {
+	if force {
+		return rva.removeVM(force)
+	}
+
+	err := rva.assertVMIsStopped(rva.creator, rva.logger)
+	if err != nil {
+		return err
+	}
+
+	return rva.removeVM(false)
+}
+
+func (rva *removeVMAction) assertVMIsStopped(creator command.NerdctlCmdCreator, logger flog.Logger) error {
+	status, err := lima.GetVMStatus(creator, logger, limaInstanceName)
+	if err != nil {
+		return err
+	}
+	switch status {
+	case lima.Nonexistent:
+		return fmt.Errorf("the instance %q does not exist", limaInstanceName)
+	case lima.Running:
+		return fmt.Errorf("the instance %q is running, run `finch %s stop` to stop the instance first",
+			limaInstanceName, virtualMachineRootCmd)
+	default:
+		return nil
+	}
+}
+
+func (rva *removeVMAction) removeVM(force bool) error {
+	// Stop credential server before VM stops (macOS only)
+	// macOS: Credential server runs on host and communicates with VM via Unix socket using finchhost credential helper
+	// Windows: No credential server needed - WSL can access credentials and credhelpers via mounted ~/.finch/config.json
+	execPath, err := os.Executable()
+	if err == nil {
+		// Resolve symlink to get actual installation path
+		realPath, err := filepath.EvalSymlinks(execPath)
+		if err != nil {
+			realPath = execPath
+		}
+		finchRootPath := filepath.Dir(filepath.Dir(realPath))
+		if err := credserver.StopCredentialServer(finchRootPath); err != nil {
+			rva.logger.Warnf("Failed to stop credential server: %v", err)
+		}
+	}
+
+	_ = rva.diskManager.DetachUserDataDisk()
+	limaCmd := rva.createVMRemoveCommand(force)
+	if force {
+		rva.logger.Info("Forcibly removing Finch virtual machine...")
+	} else {
+		rva.logger.Info("Removing existing Finch virtual machine...")
+	}
+	logs, err := limaCmd.CombinedOutput()
+	if err != nil {
+		rva.logger.Errorf("Finch virtual machine failed to remove, debug logs:\n%s", logs)
+		return err
+	}
+	rva.logger.Info("Finch virtual machine removed successfully")
+	return nil
+}
+
+func (rva *removeVMAction) createVMRemoveCommand(force bool) command.Command {
+	if force {
+		return rva.creator.CreateWithoutStdio("remove", "--force", limaInstanceName)
+	}
+	return rva.creator.CreateWithoutStdio("remove", limaInstanceName)
+}

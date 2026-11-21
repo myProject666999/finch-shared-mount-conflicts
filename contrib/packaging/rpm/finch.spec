@@ -1,0 +1,266 @@
+%global _trivial .0
+%global _buildid .1
+
+%global debug_package %{nil}
+%global pkg_config ../config
+
+# finch
+%global finch_package github.com/runfinch/finch
+%global finch_src finch-%{finch_commit}
+%global finch_rpm_version %(r=%finch_release; echo ${r%%%%-*})
+
+# buildkit
+%global buildkit_package github.com/moby/buildkit
+%global buildkit_src buildkit-%{buildkit_commit}
+%global buildkit_rpm_version %(r=%buildkit_release; echo ${r%%%%-*})
+
+# soci-snapshotter
+%global soci_package github.com/awslabs/soci-snapshotter
+%global soci_src soci-snapshotter-%{soci_commit}
+%global soci_rpm_version %(r=%soci_release; echo ${r%%%%-*})
+
+# finch-daemon
+%global finch_daemon_package github.com/runfinch/finch-daemon
+%global finch_daemon_src finch-daemon-%{finch_daemon_commit}
+%global finch_daemon_rpm_version %(r=%finch_daemon_release; echo ${r%%%%-*})
+
+# cosign
+%global cosign_package github.com/sigstore/cosign
+%global cosign_src cosign-%{cosign_commit}
+%global cosign_rpm_version %(r=%cosign_release; echo ${r%%%%-*})
+
+Name: runfinch-finch
+Version: %{finch_rpm_version}
+Release: 1%{?dist}%{?_trivial}%{?_buildid}
+# Upstream license specification: Apache-2.0
+License: ASL 2.0
+Summary: The Finch CLI is an open source client for container development tool
+
+%if %{defined build_latest}
+Source0: https://github.com/runfinch/finch/archive/refs/heads/%{latest_branch}.tar.gz
+%else
+%if %{defined build_local}
+Source0: finch-%{finch_release}.tar.gz
+%else
+Source0: https://%{finch_package}/archive/%{finch_commit}/%{finch_release}.tar.gz
+%endif
+%endif
+Source1: %{pkg_config}/finch.service
+Source2: %{pkg_config}/finch.socket
+Source3: %{pkg_config}/finch.yaml
+Source4: %{pkg_config}/nerdctl.toml
+Source5: %{pkg_config}/buildkitd.toml
+Source6: %{pkg_config}/finch-buildkit.service
+Source7: %{pkg_config}/finch-buildkit.socket
+Source8: %{pkg_config}/finch-soci.service
+Source9: %{pkg_config}/finch-soci.socket
+Source10: %{pkg_config}/soci-snapshotter-grpc.toml
+
+# finch-daemon
+Source500: https://%{finch_daemon_package}/archive/%{finch_daemon_commit}/%{finch_daemon_src}.tar.gz
+
+# buildkit
+Source1000: https://%{buildkit_package}/archive/%{buildkit_commit}/%{buildkit_src}.tar.gz
+
+# soci-snapshotter
+Source2000: https://%{soci_package}/archive/%{soci_commit}/%{soci_src}.tar.gz
+
+# cosign
+Source3000: https://%{cosign_package}/archive/%{cosign_commit}/%{cosign_src}.tar.gz
+
+# Runtime requirements
+Requires: containerd >= %{min_containerd_version}
+Requires: nerdctl >= %{min_nerdctl_version}
+Requires: cni-plugins >= %{min_cni_plugins_version}
+
+Provides: finch = %{finch_rpm_version}
+# License: ASL 2.0
+Provides: bundled(finch-daemon) = %{finch_daemon_rpm_version}
+# License: ASL 2.0
+Provides: bundled(buildctl) = %{buildkit_rpm_version}
+# License: ASL 2.0
+Provides: bundled(buildkitd) = %{buildkit_rpm_version}
+# License: ASL 2.0
+Provides: bundled(cosign) = %{cosign_rpm_version}
+
+# Compilation requirements
+BuildRequires: git, make
+%if 0%{?amzn} > 2
+# this macro package doesn't exist on AL2
+BuildRequires: systemd-rpm-macros
+BuildRequires: golang >= 1.23.7
+%else
+# Amazon Linux 2 does not yet have a build for golang >= 1.23,
+# so we have to provide our own compatible installation.
+# BuildRequires: golang >= 1.23.7
+%endif
+
+%description
+Finch is an open source client for container development. Its simple
+installer provides a minimal native client along with an opinionated
+distribution of other open source components. Rather than creating
+even more options to reason about and choose from, Finch aims to help
+promote other projects by making it easy to install and use them,
+while offering a simple native client to tie it all together.
+
+%prep
+# %setup -D -T -c -b 0 -n finch-%{finch_commit}
+%setup -c
+%if %{defined build_latest}
+mv "finch-%{latest_branch}" "%{finch_src}"
+%endif
+
+# extract finch-daemon
+%setup -D -T -a 500
+# extract buildkit
+%setup -D -T -a 1000
+# extract soci
+%setup -D -T -a 2000
+# extract cosign
+%setup -D -T -a 3000
+
+%build
+
+# build finch
+pushd "%{finch_src}"
+VERSION=%{finch_release} GITCOMMIT=%{finch_commit} make finch
+popd
+
+# build finch-daemon
+pushd "%{finch_daemon_src}"
+make build
+popd
+
+# build buildkit
+pushd "%{buildkit_src}"
+go build -mod=vendor -buildmode=pie -ldflags '-w -X %{buildkit_package}/version.Version=%{buildkit_rpm_version}' -o _output/buildkitd %{buildkit_package}/cmd/buildkitd
+go build -mod=vendor -buildmode=pie -ldflags '-w -X %{buildkit_package}/version.Version=%{buildkit_rpm_version}' -o _output/buildctl %{buildkit_package}/cmd/buildctl
+popd
+
+# build soci
+pushd "%{soci_src}"
+make
+popd
+
+# build cosign
+pushd "%{cosign_src}"
+GIT_VERSION="%{cosign_release}" GIT_HASH="%{cosign_commit}" make cosign
+popd
+
+%check
+# pushd "%finch_src"
+# make test-unit
+# popd
+
+%install
+# install finch
+install -d %{buildroot}%{_bindir}
+install -d %{buildroot}%{_unitdir}
+install -d %{buildroot}%{_sharedstatedir}/finch/nerdctl
+install -p %{finch_src}/_output/bin/finch %{buildroot}%{_bindir}
+install -D -p -m 0644 %{S:1} %{buildroot}%{_unitdir}/finch.service
+install -D -p -m 0644 %{S:2} %{buildroot}%{_unitdir}/finch.socket
+install -d -p -m 0755 %{buildroot}%{_sysconfdir}/finch
+install -D -p -m 0644 %{S:3} %{buildroot}%{_sysconfdir}/finch/finch.yaml
+install -d -p -m 0755 %{buildroot}%{_sysconfdir}/finch/nerdctl/
+install -D -p -m 0644 %{S:4} %{buildroot}%{_sysconfdir}/finch/nerdctl/nerdctl.toml
+
+# install finch-daemon
+install -D -p -m 0755 %{finch_daemon_src}/bin/finch-daemon %{buildroot}%{_libexecdir}/finch/finch-daemon
+install -D -p -m 0755 %{finch_daemon_src}/bin/docker-credential-finch %{buildroot}%{_libexecdir}/finch/docker-credential-finch
+
+# install buildkit
+install -d %{buildroot}%{_sharedstatedir}/finch/buildkit
+install -D -p %{buildkit_src}/_output/buildkitd %{buildroot}%{_libexecdir}/finch/buildkitd
+install -D -p %{buildkit_src}/_output/buildctl %{buildroot}%{_libexecdir}/finch/buildctl
+install -d -p -m 0755 %{buildroot}%{_sysconfdir}/finch/buildkit/
+install -D -p -m 0644 %{S:5} %{buildroot}%{_sysconfdir}/finch/buildkit/buildkitd.toml
+install -D -p -m 0644 %{S:6} %{buildroot}%{_unitdir}/finch-buildkit.service
+install -D -p -m 0644 %{S:7} %{buildroot}%{_unitdir}/finch-buildkit.socket
+
+# install soci
+install -d %{buildroot}%{_sharedstatedir}/finch/soci
+install -D -p %{soci_src}/out/soci %{buildroot}%{_libexecdir}/finch/soci
+install -D -p %{soci_src}/out/soci-snapshotter-grpc %{buildroot}%{_libexecdir}/finch/soci-snapshotter-grpc
+install -D -p -m 0644 %{S:8} %{buildroot}%{_unitdir}/finch-soci.service
+install -D -p -m 0644 %{S:9} %{buildroot}%{_unitdir}/finch-soci.socket
+install -D -p -m 0644 %{S:10} %{buildroot}%{_sysconfdir}/finch/soci/soci-snapshotter-grpc.toml
+
+# install cosign
+install -D -p %{cosign_src}/cosign %{buildroot}%{_libexecdir}/finch/cosign
+
+# nerdctl
+ln -sf /usr/local/bin/nerdctl %{buildroot}%{_libexecdir}/finch/nerdctl
+
+%if 0%{?amzn} == 2
+# On a fresh install of container-selinux, or updating from selinux-policy in
+# amzn2-core to one that more closely tracks upstream, we need to relabel critical
+# files to pick up changes to file_contexts introduced by those packages.
+%define selinux_relabel_paths %{_bindir}/finch \
+        %{_sysconfdir}/finch/ \
+        %{_sharedstatedir}/finch/ \
+        %{_sharedstatedir}/finch/nerdctl \
+        %{_libexecdir}/finch/buildctl \
+        %{_sysconfdir}/finch/buildkit \
+        %{_sharedstatedir}/finch/buildkit \
+        %{_libexecdir}/finch/soci \
+        %{_libexecdir}/finch/soci-snapshotter-grpc \
+        %{_sysconfdir}/finch/soci
+
+%define do_selinux_relabel() /usr/sbin/selinuxenabled && /usr/sbin/restorecon -r %*
+
+%triggerin -- container-selinux
+if [ $1 -eq 1 ]; then # new install, not update
+  %{do_selinux_relabel} %{selinux_relabel_paths} ||:
+fi
+%endif
+
+%files
+%license finch-%{finch_commit}/LICENSE
+%license buildkit-%{buildkit_commit}/LICENSE
+%doc finch-%{finch_commit}/README.md
+%{_bindir}/finch
+%config(noreplace) %{_sysconfdir}/finch/finch.yaml
+%config(noreplace) %{_sysconfdir}/finch/nerdctl/nerdctl.toml
+%{_unitdir}/finch.service
+%{_unitdir}/finch.socket
+
+# finch-daemon
+%{_libexecdir}/finch/finch-daemon
+%{_libexecdir}/finch/docker-credential-finch
+
+# buildkit
+%config(noreplace) %{_sysconfdir}/finch/buildkit/buildkitd.toml
+%{_libexecdir}/finch/buildkitd
+%{_libexecdir}/finch/buildctl
+%{_unitdir}/finch-buildkit.service
+%{_unitdir}/finch-buildkit.socket
+%{_sharedstatedir}/finch/nerdctl
+%{_sharedstatedir}/finch/buildkit
+
+# soci-snapshotter
+%config(noreplace) %{_sysconfdir}/finch/soci/soci-snapshotter-grpc.toml
+%{_libexecdir}/finch/soci
+%{_libexecdir}/finch/soci-snapshotter-grpc
+%{_unitdir}/finch-soci.service
+%{_unitdir}/finch-soci.socket
+%{_sharedstatedir}/finch/soci
+
+# cosign
+%{_libexecdir}/finch/cosign
+
+# nerdctl
+%{_libexecdir}/finch/nerdctl
+
+%post
+%systemd_post finch
+
+%preun
+%systemd_preun finch
+
+%postun
+%systemd_postun_with_restart finch
+
+%changelog
+* Fri Jul 26 2024 Justin Alvarez <alvajus@amazon.com> - 
+- First pre-release RPM spec

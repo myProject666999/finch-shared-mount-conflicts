@@ -1,0 +1,49 @@
+version: 2
+updates:
+- package-ecosystem: "gomod"
+  directory: "/"
+  schedule:
+    interval: "daily"
+  commit-message:
+    # When a dependency is updated,
+    # we want release-please to treat the corresponding commit as a releasable unit
+    # because it may contain a security fix.
+    #
+    # Re. how that is achieved, see `changelog-types` in workflows/release-please.yml.
+    prefix: "build"
+    include: "scope"
+  groups:
+    docker:
+      patterns:
+        - "github.com/docker/docker"
+        - "github.com/docker/cli"
+    project-dependency:
+      patterns:
+        - "*"
+      exclude-patterns:
+        - "github.com/docker/docker"
+        - "github.com/docker/cli"
+  ignore:
+    # Only allow patch version bumps for containerd/nerdctl as minor version bumps should be intentional
+    - dependency-name: "github.com/containerd/containerd/v2"
+      update-types:
+        - "version-update:semver-minor"
+        - "version-update:semver-major"
+    - dependency-name: "github.com/containerd/nerdctl/v2"
+      update-types:
+        - "version-update:semver-minor"
+        - "version-update:semver-major"
+      # TODO: containerd/api v1.12.0 is broken with containerd 2.3
+      # Remove this once we upgrade to containerd 2.4.x
+    - dependency-name: "github.com/containerd/containerd/api"
+- package-ecosystem: "github-actions"
+  directory: "/"
+  schedule:
+    interval: "daily"
+  commit-message:
+    prefix: "ci"
+    include: "scope"
+  groups:
+    github-actions:
+      patterns:
+        - "*"

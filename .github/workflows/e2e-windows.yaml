@@ -1,0 +1,141 @@
+name: e2e-windows
+on:
+  workflow_call:
+    inputs:
+      arch:
+        type: string
+        required: true
+      runner-type:
+        type: string
+        required: true
+      test-command:
+        type: string
+        required: true
+
+permissions:
+  # This is required for configure-aws-credentials to request an OIDC JWT ID token to access AWS resources later on.
+  # More info: https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect#adding-permissions-settings
+  id-token: write
+  # This is required for actions/checkout
+  contents: read
+
+env:
+  GO_VERSION: '1.26.10'
+
+jobs:
+  test:
+    timeout-minutes: 180
+    runs-on:
+      [
+        "self-hosted",
+        "windows",
+        "${{ inputs.arch }}",
+        "${{ inputs.runner-type }}",
+      ]
+    outputs:
+      has_creds: ${{ steps.vars.outputs.has_creds}}
+      vm_report: ${{ steps.set-multiple-vars.outputs.VM_REPORT }}
+      container_report: ${{ steps.set-multiple-vars.outputs.CONTAINER_REPORT }}
+      vm_serial_report: ${{ steps.set-multiple-vars.outputs.VM_SERIAL_REPORT }}  
+    steps:
+      - name: Clean GitHub runner workspace
+        run: |
+          Remove-Item -Path "${{ github.workspace }}\*" -Recurse -Force -ErrorAction SilentlyContinue
+      - name: Configure git CRLF settings
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - name: Cleanup previous checkouts
+        run: |
+          takeown /F C:\actions-runner\_work\finch /R
+          Remove-Item C:\actions-runner\_work\finch\finch -Recurse -Force -ErrorAction Ignore
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # We need to get all the git tags to make version injection work. See VERSION in Makefile for more detail.
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: recursive
+      - name: Set output variables
+        id: vars
+        run: |
+          $has_creds="${{ (github.event_name == 'push' || github.repository == github.event.pull_request.head.repo.full_name) && github.actor != 'dependabot[bot]'}}"
+          echo "has_creds=$has_creds" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf8 -Append
+          exit 0 # if $has_creds is false, powershell will exit with code 1 and this step will fail
+      - name: configure aws credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: env.has_creds == 'true'
+        with:
+          role-to-assume: ${{ secrets.ROLE }}
+          role-session-name: credhelper-test
+          aws-region: ${{ secrets.REGION }}
+      - name: Remove Finch VM
+        timeout-minutes: 5
+        run: ./scripts/cleanup_wsl.ps1
+      - name: Clean up previous files
+        run: |
+          Remove-Item C:\Users\Administrator\.finch -Recurse -ErrorAction Ignore
+          Remove-Item C:\Users\Administrator\AppData\Local\.finch -Recurse -ErrorAction Ignore
+          Remove-Item ${{ github.workspace }}\cov -Recurse -ErrorAction Ignore
+          make clean
+          cd deps/finch-core && make clean
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Build project
+        run: |
+          git status
+          $env:E2E_COVERAGE="1"
+          make
+      - name: Run e2e tests
+        run: |
+          # set path to use newer ssh version
+          $newPath = (";C:\Program Files\Git\bin\;" + "C:\Program Files\Git\usr\bin\;" + "$env:Path")
+          $env:Path = $newPath
+
+          # set networking config option to allow for VM/container -> host communication
+          echo "networkingMode=mirrored`nhostAddressLoopback=true" > C:\Users\Administrator\.wslconfig
+
+          git status
+          git clean -f -d
+
+          # let the container e2e suite allow WSL VM -> host traffic through Windows Firewall
+          $env:FINCH_E2E_ALLOW_WSL_HOST_TRAFFIC="true"
+          make ${{ inputs.test-command }}
+      - name: Show test coverage
+        run: make test-e2e-cov
+      - name: Set artifacts name outputs
+        if: always()
+        id: set-multiple-vars
+        run: |
+          "VM_REPORT=${{ github.run_id }}-${{ github.run_attempt }}-e2e-vm-report.json" >> $env:GITHUB_OUTPUT
+          "CONTAINER_REPORT=${{ github.run_id }}-${{ github.run_attempt }}-e2e-container-report.json" >> $env:GITHUB_OUTPUT
+          "VM_SERIAL_REPORT=${{ github.run_id }}-${{ github.run_attempt }}-e2e-vm-serial-report.json" >> $env:GITHUB_OUTPUT
+      - name: Upload reports artifact
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-${{ inputs.test-command }}-2022-${{ inputs.arch }}-${{ github.run_id }}-${{ github.run_attempt }}-e2e-reports
+          path: ${{ github.workspace }}/reports/${{ github.run_id }}-${{ github.run_attempt }}-*.json
+      - name: Remove Finch VM and Clean Up Previous Environment
+        if: ${{ always() }}
+        timeout-minutes: 5
+        run: |
+          ./scripts/cleanup_wsl.ps1
+          make clean
+          cd deps/finch-core && make clean
+          exit 0 # Cleanup may set the exit code e.g. if a file doesn't exist; just ignore
+  upload-e2e-test-reports:
+    needs: test
+    if: always()
+    uses: ./.github/workflows/upload-test-report.yaml
+    secrets: inherit
+    with:
+      os: "windows"
+      arch: ${{ inputs.arch }}
+      version: "2022"
+      test-command: ${{ inputs.test-command }}
+      has-creds: ${{ needs.test.outputs.has_creds }}
+      vm_report: ${{ needs.test.outputs.vm_report }}
+      container_report: ${{ needs.test.outputs.container_report }}
+      vm_serial_report: ${{ needs.test.outputs.vm_serial_report }}

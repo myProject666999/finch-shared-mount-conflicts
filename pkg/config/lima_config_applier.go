@@ -1,0 +1,319 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build darwin || windows
+
+package config
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/lima-vm/lima/v2/pkg/limatype"
+	"github.com/spf13/afero"
+	"github.com/xorcare/pointer"
+	"golang.org/x/exp/slices"
+	"gopkg.in/yaml.v3"
+
+	"github.com/runfinch/finch/pkg/command"
+	"github.com/runfinch/finch/pkg/flog"
+	"github.com/runfinch/finch/pkg/system"
+)
+
+var (
+	// SociVersion will be injected via Makefile.
+	SociVersion string
+	// SociAMD64Sha256Sum will be injected via Makefile.
+	SociAMD64Sha256Sum string
+	// SociARM64Sha256Sum will be injected via Makefile.
+	SociARM64Sha256Sum string
+)
+
+const (
+	snapshotterProvisioningScriptHeader      = "# snapshotter provisioning script"
+	sociInstallationProvisioningScriptHeader = snapshotterProvisioningScriptHeader + ": soci"
+	sociFileNameFormat                       = "soci-snapshotter-%s-linux-%s.tar.gz"
+	sociDownloadURLFormat                    = "https://github.com/awslabs/soci-snapshotter/releases/download/v%s/%s"
+	sociServiceDownloadURLFormat             = "https://raw.githubusercontent.com/awslabs/soci-snapshotter/v%s/soci-snapshotter.service"
+	//nolint:lll // command string
+	sociInstallationScriptFormat = `%s
+if [ ! -f /usr/local/bin/soci ]; then
+	# download soci
+	set -e
+
+	# pull release tarball
+	release_tarball="%s"
+	curl --retry 2 --retry-max-time 120 -OL "%s"
+
+	# validate shasum
+	(sha256sum "${release_tarball}" | cut -d ' ' -f 1 | grep -xq "^%s$") || \
+	  (echo "error: shasum verification failed for SOCI release tarball" && rm -f "${release_tarball}" && exit 1)
+
+	# move to usr/local/bin
+	tar -C /usr/local/bin -xvf ${release_tarball} soci soci-snapshotter-grpc
+
+	# install as a systemd service
+	curl --retry 2 --retry-max-time 120 -OL "%s"
+	mv soci-snapshotter.service /usr/local/lib/systemd/system/
+	ln -s /usr/local/lib/systemd/system/soci-snapshotter.service /etc/systemd/system/multi-user.target.wants/
+	restorecon -v /usr/local/lib/systemd/system/soci-snapshotter.service
+	systemctl daemon-reload
+	sudo mkdir -p /usr/local/lib/systemd/system/soci-snapshotter.service.d/
+	printf '[Unit]\nPartOf=containerd.service\n\n[Service]\nKillSignal=SIGTERM\n' | sudo tee /usr/local/lib/systemd/system/soci-snapshotter.service.d/finch.conf
+%s
+	systemctl enable --now soci-snapshotter
+fi
+
+# changing containerd config, this seems to get reset on every VM stop/start
+if ! grep -q soci /etc/containerd/config.toml; then
+	printf '    [proxy_plugins.soci]\n      type = "snapshot"\n      address = "/run/soci-snapshotter-grpc/soci-snapshotter-grpc.sock"\n' >> /etc/containerd/config.toml
+fi
+
+sudo systemctl restart containerd.service
+`
+
+	userModeEmulationProvisioningScriptHeader = "# cross-arch tools"
+	wslDiskFormatScriptHeader                 = "# wsl disk format script"
+	qemuPkgInstallationScript                 = `%s
+#!/bin/bash
+qemu_pkgs=""
+if [ ! -f /usr/bin/qemu-aarch64-static ]; then
+	qemu_pkgs="$qemu_pkgs qemu-user-static-aarch64"
+elif [ ! -f /usr/bin/qemu-aarch64-static ]; then
+	qemu_pkgs="$qemu_pkgs qemu-user-static-arm"
+elif [ ! -f  /usr/bin/qemu-aarch64-static ]; then
+	qemu_pkgs="$qemu_pkgs qemu-user-static-x86"
+fi
+
+if [[ $qemu_pkgs ]]; then
+	dnf install -y --setopt=install_weak_deps=False ${qemu_pkgs}
+fi
+`
+)
+
+// LimaConfigApplierSystemDeps contains the system dependencies for LimaConfigApplier.
+//
+//go:generate mockgen -copyright_file=../../copyright_header -destination=../mocks/pkg_config_lima_config_applier_system_deps.go -package=mocks -mock_names LimaConfigApplierSystemDeps=LimaConfigApplierSystemDeps . LimaConfigApplierSystemDeps
+type LimaConfigApplierSystemDeps interface {
+	system.RuntimeArchGetter
+	system.RuntimeOSGetter
+}
+
+type limaConfigApplier struct {
+	cfg                    *Finch
+	cmdCreator             command.Creator
+	fs                     afero.Fs
+	limaDefaultConfigPath  string
+	limaOverrideConfigPath string
+	systemDeps             LimaConfigApplierSystemDeps
+	finchConfigPath        string
+}
+
+var _ LimaConfigApplier = (*limaConfigApplier)(nil)
+
+// NewLimaApplier creates a new LimaConfigApplier that
+// applies lima configuration changes by writing to the lima config file on the disk.
+func NewLimaApplier(
+	cfg *Finch,
+	cmdCreator command.Creator,
+	fs afero.Fs,
+	limaDefaultConfigPath string,
+	limaOverrideConfigPath string,
+	systemDeps LimaConfigApplierSystemDeps,
+	finchConfigPath string,
+) LimaConfigApplier {
+	return &limaConfigApplier{
+		cfg:                    cfg,
+		cmdCreator:             cmdCreator,
+		fs:                     fs,
+		limaDefaultConfigPath:  limaDefaultConfigPath,
+		limaOverrideConfigPath: limaOverrideConfigPath,
+		systemDeps:             systemDeps,
+		finchConfigPath:        finchConfigPath,
+	}
+}
+
+// ConfigureDefaultLimaYaml writes Lima-specific config values from Finch's config to default.yaml at lima config file path.
+// ConfigureDefaultLimaYaml will create a default.yaml at the path if it does not exist.
+func (lca *limaConfigApplier) ConfigureDefaultLimaYaml(logger flog.Logger) error {
+	if err := afero.WriteFile(lca.fs, lca.limaDefaultConfigPath, []byte(""), 0o600); err != nil {
+		return fmt.Errorf("failed to create the an empty lima config file: %w", err)
+	}
+
+	var limaCfg limatype.LimaYAML
+	var vzOpts limatype.VZOpts
+	vzOpts.Rosetta.Enabled = pointer.Bool(false)
+	vzOpts.Rosetta.BinFmt = pointer.Bool(false)
+	if limaCfg.VMOpts == nil {
+		limaCfg.VMOpts = make(map[limatype.VMType]any)
+	}
+	limaCfg.VMOpts[limatype.VZ] = &vzOpts
+
+	if lca.cfg.Experimental.MountInotify {
+		limaCfg.MountInotify = pointer.Bool(lca.cfg.Experimental.MountInotify)
+	}
+
+	cfgAfterInit, err := lca.configureVirtualizationFramework(&limaCfg, logger)
+	if err != nil {
+		return fmt.Errorf("failed to apply init-only config values: %w", err)
+	}
+	limaCfg = *cfgAfterInit
+
+	limaCfgBytes, err := yaml.Marshal(limaCfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal the lima config file: %w", err)
+	}
+
+	if err := afero.WriteFile(lca.fs, lca.limaDefaultConfigPath, limaCfgBytes, 0o600); err != nil {
+		return fmt.Errorf("failed to write to the lima config file: %w", err)
+	}
+
+	return nil
+}
+
+// ConfigureOverrideLimaYaml writes Lima-specific config values from Finch's config to override.yaml at lima config file path.
+// ConfigureOverrideLimaYaml will create a override.yaml at the path if it does not exist.
+func (lca *limaConfigApplier) ConfigureOverrideLimaYaml() error {
+	if err := afero.WriteFile(lca.fs, lca.limaOverrideConfigPath, []byte(""), 0o600); err != nil {
+		return fmt.Errorf("failed to create the an empty lima config file: %w", err)
+	}
+	var limaCfg limatype.LimaYAML
+
+	lca.configureCPUs(&limaCfg)
+	lca.configureMemory(&limaCfg)
+	lca.configureMounts(&limaCfg)
+	lca.configureDisk(&limaCfg)
+
+	if *lca.cfg.VMType != "wsl2" && len(limaCfg.AdditionalDisks) == 0 {
+		limaCfg.AdditionalDisks = append(limaCfg.AdditionalDisks, limatype.Disk{
+			Name: "finch",
+		})
+	}
+
+	err := lca.provisionSnapshotters(&limaCfg)
+	if err != nil {
+		return fmt.Errorf("failed to provision snapshotters: %w", err)
+	}
+
+	err = lca.configureDefaultSnapshotter(&limaCfg)
+	if err != nil {
+		return fmt.Errorf("failed to configure default snapshotter: %w", err)
+	}
+
+	if *lca.cfg.VMType == "wsl2" {
+		ensureWslDiskFormatScript(&limaCfg)
+	}
+
+	limaCfgBytes, err := yaml.Marshal(limaCfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal the lima config file: %w", err)
+	}
+
+	if err := afero.WriteFile(lca.fs, lca.limaOverrideConfigPath, limaCfgBytes, 0o600); err != nil {
+		return fmt.Errorf("failed to write to the lima config file: %w", err)
+	}
+
+	return nil
+}
+
+func validateSnapshotter(snapshotter string) error {
+	supportedSnapshotters := []string{"overlayfs", "soci"}
+	if !slices.Contains(supportedSnapshotters, snapshotter) {
+		return fmt.Errorf("snapshotter %s is not supported", snapshotter)
+	}
+	return nil
+}
+
+func (lca *limaConfigApplier) configureDefaultSnapshotter(limaCfg *limatype.LimaYAML) error {
+	if len(lca.cfg.Snapshotters) == 0 {
+		limaCfg.Env = map[string]string{}
+		return nil
+	}
+
+	snapshotter := lca.cfg.Snapshotters[0]
+	err := validateSnapshotter(snapshotter)
+	if err != nil {
+		return err
+	}
+
+	limaCfg.Env = map[string]string{"CONTAINERD_SNAPSHOTTER": snapshotter}
+
+	return nil
+}
+
+func (lca *limaConfigApplier) provisionSnapshotters(limaCfg *limatype.LimaYAML) error {
+	for _, snapshotter := range lca.cfg.Snapshotters {
+		switch snapshotter {
+		case "soci":
+			lca.provisionSociSnapshotter(limaCfg)
+		case "overlayfs":
+			continue
+		default:
+			return fmt.Errorf("snapshotter %s is not supported", snapshotter)
+		}
+	}
+
+	return nil
+}
+
+func (lca *limaConfigApplier) provisionSociSnapshotter(limaCfg *limatype.LimaYAML) {
+	arch := lca.systemDeps.Arch()
+	sociFileName := fmt.Sprintf(sociFileNameFormat, SociVersion, arch)
+	sociDownloadURL := fmt.Sprintf(sociDownloadURLFormat, SociVersion, sociFileName)
+	sociSha256Sum := SociAMD64Sha256Sum
+	if arch == "arm64" {
+		sociSha256Sum = SociARM64Sha256Sum
+	}
+	sociServiceDownloadURL := fmt.Sprintf(sociServiceDownloadURLFormat, SociVersion)
+
+	// Platform-specific DOCKER_CONFIG for SOCI service (macOS only)
+	// This is needed as DOCKER_CONFIG for SOCI defaults to ~/.finch/config,
+	// following similar behavior to nerdctl. However, since DOCKER_CONFIG for nerdctl
+	// now points to ~/.finch-vm-config to support a custom credential helper in Lima on macOS,
+	// SOCI must be updated to point to this new config to retain it's behavior.
+	// TODO: Update logic for "wsl2" case once wincred credential helper support is added.
+	dockerConfigSetup := ""
+	if *lca.cfg.VMType != "wsl2" {
+		dockerConfigSetup = `	sudo mkdir -p /etc/systemd/system/soci-snapshotter.service.d/
+	printf '[Service]\nEnvironment="DOCKER_CONFIG=$HOME/.finch-vm-config"\n' | ` +
+			`sudo tee /etc/systemd/system/soci-snapshotter.service.d/override.conf`
+	}
+
+	sociInstallationScript := fmt.Sprintf(sociInstallationScriptFormat, sociInstallationProvisioningScriptHeader,
+		sociFileName, sociDownloadURL, sociSha256Sum, sociServiceDownloadURL, dockerConfigSetup)
+	limaCfg.Provision = append(limaCfg.Provision, limatype.Provision{
+		Mode:   "system",
+		Script: &sociInstallationScript,
+	})
+}
+
+func ensureWslDiskFormatScript(limaCfg *limatype.LimaYAML) {
+	if hasScript := findWslDiskFormatScript(limaCfg); !hasScript {
+		scriptContent := fmt.Sprintf(`%s
+#!/bin/bash
+mkdir -p /mnt/lima-finch
+mount "$(blkid -s TYPE -t LABEL=FinchDataDisk -o device)" /mnt/lima-finch
+`, wslDiskFormatScriptHeader)
+		limaCfg.Provision = append(limaCfg.Provision, limatype.Provision{
+			Mode:   "system",
+			Script: &scriptContent,
+		})
+	}
+}
+
+func findWslDiskFormatScript(limaCfg *limatype.LimaYAML) bool {
+	hasWslDiskFormatScript := false
+	for _, prov := range limaCfg.Provision {
+		trimmed := strings.Trim(*prov.Script, " ")
+		if !hasWslDiskFormatScript && strings.HasPrefix(trimmed, wslDiskFormatScriptHeader) {
+			hasWslDiskFormatScript = true
+			break
+		}
+	}
+
+	return hasWslDiskFormatScript
+}
+
+func (lca *limaConfigApplier) GetFinchConfigPath() string {
+	return lca.finchConfigPath
+}

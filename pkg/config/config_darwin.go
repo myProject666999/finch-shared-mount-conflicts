@@ -1,0 +1,150 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build darwin
+
+package config
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/spf13/afero"
+	"gopkg.in/yaml.v3"
+
+	"github.com/runfinch/finch/pkg/command"
+	"github.com/runfinch/finch/pkg/flog"
+	"github.com/runfinch/finch/pkg/fmemory"
+	"github.com/runfinch/finch/pkg/system"
+)
+
+// SystemSettings represents the system configuration specific to macOS.
+type SystemSettings struct {
+	CPUs                  *int                  `yaml:"cpus,omitempty"`
+	Memory                *string               `yaml:"memory,omitempty"`
+	AdditionalDirectories []AdditionalDirectory `yaml:"additional_directories,omitempty"`
+	Rosetta               *bool                 `yaml:"rosetta,omitempty"`
+	BootDisk              *string               `yaml:"bootdisk,omitempty"`
+	DataDisk              *string               `yaml:"datadisk,omitempty"`
+	VMNet                 *bool                 `yaml:"vmnet,omitempty"`
+	SharedSystemSettings  `yaml:",inline"`
+}
+
+// Finch represents the configuration file for Finch CLI.
+type Finch struct {
+	SystemSettings `yaml:",inline"`
+	SharedSettings `yaml:",inline"`
+}
+
+// SupportsRosettaWithLinuxKernel6_18 checks if macOS >= 26 or not.
+func SupportsRosettaWithLinuxKernel6_18(cmdCreator command.Creator) (bool, error) {
+	majorVersionInt, err := getMacOSMajorVersion(cmdCreator)
+	if err != nil {
+		return false, fmt.Errorf("failed to get mac os major version: %w", err)
+	}
+	// rosetta with Linux kernel 6.18 only works on macOS >= 26
+	if majorVersionInt >= 26 {
+		return true, nil
+	}
+	return false, nil
+}
+
+// SupportsVirtualizationFramework checks if the user's system supports Virtualization.framework.
+func SupportsVirtualizationFramework(cmdCreator command.Creator) (bool, error) {
+	majorVersionInt, err := getMacOSMajorVersion(cmdCreator)
+	if err != nil {
+		return false, fmt.Errorf("failed to get mac os major version: %w", err)
+	}
+	if majorVersionInt >= 13 {
+		return true, nil
+	}
+	return false, nil
+}
+
+func getMacOSMajorVersion(cmdCreator command.Creator) (int64, error) {
+	cmd := cmdCreator.Create("sw_vers", "-productVersion")
+	out, err := cmd.Output()
+	if err != nil {
+		return -1, fmt.Errorf("failed to run sw_vers command: %w", err)
+	}
+
+	splitVer := strings.Split(string(out), ".")
+	if len(splitVer) == 0 {
+		return -1, fmt.Errorf("unexpected result from string split: %v", splitVer)
+	}
+
+	majorVersionInt, err := strconv.ParseInt(splitVer[0], 10, 64)
+	if err != nil {
+		return -1, fmt.Errorf("failed to parse split sw_vers output (%s) into int: %w", splitVer[0], err)
+	}
+
+	return majorVersionInt, nil
+}
+
+// ModifyFinchConfig Modify Finch's configuration from user inputs.
+func ModifyFinchConfig(fs afero.Fs, logger flog.Logger, finchConfigPath string, opts VMConfigOpts) (bool, error) {
+	var isConfigUpdated bool
+
+	systemDeps := system.NewStdLib()
+	mem := fmemory.NewMemory()
+
+	finchCfg, err := loadFinchConfig(fs, finchConfigPath, logger, systemDeps, mem)
+	if err != nil {
+		return isConfigUpdated, err
+	}
+
+	cpus, memory := opts.CPUs, opts.Memory
+	bootDisk, dataDisk := opts.BootDisk, opts.DataDisk
+	// This should never happen when called from the CLI, but good to cover just in case
+	if cpus == nil && memory == nil && bootDisk == nil && dataDisk == nil {
+		return isConfigUpdated, fmt.Errorf("specify at least one flag")
+	}
+	if cpus != nil && *cpus != *finchCfg.CPUs {
+		*finchCfg.CPUs = *cpus
+		isConfigUpdated = true
+	}
+	if memory != nil && *memory != *finchCfg.Memory {
+		*finchCfg.Memory = *memory
+		isConfigUpdated = true
+	}
+	if bootDisk != nil && *bootDisk != *finchCfg.BootDisk {
+		*finchCfg.BootDisk = *bootDisk
+		isConfigUpdated = true
+	}
+	if dataDisk != nil && *dataDisk != *finchCfg.DataDisk {
+		*finchCfg.DataDisk = *dataDisk
+		isConfigUpdated = true
+	}
+
+	if !isConfigUpdated {
+		return isConfigUpdated, nil
+	}
+
+	if err := validate(finchCfg, logger, systemDeps, mem); err != nil {
+		return false, fmt.Errorf("failed to validate config file: %w", err)
+	}
+	if err := writeConfig(finchCfg, fs, finchConfigPath); err != nil {
+		return false, err
+	}
+
+	return isConfigUpdated, nil
+}
+
+// loadFinchConfig Load Finch's configuration from a YAML file.
+func loadFinchConfig(fs afero.Fs, finchConfigPath string, logger flog.Logger, systemDeps LoadSystemDeps, mem fmemory.Memory) (*Finch, error) {
+	b, err := afero.ReadFile(fs, finchConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	var cfg Finch
+	if err := yaml.Unmarshal(b, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config file: %w", err)
+	}
+	if err := validate(&cfg, logger, systemDeps, mem); err != nil {
+		return nil, fmt.Errorf("failed to validate config file: %w", err)
+	}
+
+	return &cfg, nil
+}

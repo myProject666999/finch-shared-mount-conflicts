@@ -1,0 +1,92 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build darwin
+
+package vm
+
+import (
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
+	"github.com/runfinch/common-tests/command"
+	"github.com/runfinch/common-tests/option"
+)
+
+var restoreVM = func(o *option.Option) {
+	origFinchCfg := readFile(finchConfigFilePath)
+	writeFile(finchConfigFilePath, origFinchCfg)
+	command.New(o, virtualMachineRootCmd, "stop", "-f").WithoutCheckingExitCode().WithTimeoutInSeconds(20).Run()
+	time.Sleep(1 * time.Second)
+	command.New(o, virtualMachineRootCmd, "remove", "-f").WithoutCheckingExitCode().WithTimeoutInSeconds(10).Run()
+	time.Sleep(1 * time.Second)
+	command.New(o, virtualMachineRootCmd, "init").WithoutCheckingExitCode().WithTimeoutInSeconds(160).Run()
+}
+
+func testVMDisk(o *option.Option) {
+	ginkgo.Describe("vm disk commands", ginkgo.Serial, func() {
+		ginkgo.AfterEach(func() {
+			restoreVM(o)
+		})
+
+		ginkgo.Context("when VM is running", func() {
+			ginkgo.It("should fail to resize disk", func() {
+				command.New(o, virtualMachineRootCmd, "disk", "resize", "--size", "60GiB").WithoutSuccessfulExit().Run()
+			})
+
+			ginkgo.It("should display disk info", func() {
+				result := command.New(o, virtualMachineRootCmd, "disk", "info").Run()
+				gomega.Expect(result.Out.Contents()).To(gomega.ContainSubstring("finch"))
+			})
+		})
+
+		ginkgo.Context("when VM is stopped", func() {
+			ginkgo.BeforeEach(func() {
+				command.New(o, virtualMachineRootCmd, "stop").WithTimeoutInSeconds(90).Run()
+			})
+
+			ginkgo.It("should successfully resize disk", func() {
+				// Check initial disk size
+				initialResult := command.New(o, virtualMachineRootCmd, "disk", "info").Run()
+				gomega.Expect(initialResult.Out.Contents()).To(gomega.ContainSubstring("finch"))
+				gomega.Expect(initialResult.Out.Contents()).To(gomega.ContainSubstring("50GiB"))
+
+				// Perform resize operation
+				command.New(o, virtualMachineRootCmd, "disk", "resize", "--size", "60GiB").Run()
+
+				// Verify new disk size
+				finalResult := command.New(o, virtualMachineRootCmd, "disk", "info").Run()
+				gomega.Expect(finalResult.Out.Contents()).To(gomega.ContainSubstring("finch"))
+				gomega.Expect(finalResult.Out.Contents()).To(gomega.ContainSubstring("60GiB"))
+			})
+
+			ginkgo.It("should fail with invalid size format", func() {
+				command.New(o, virtualMachineRootCmd, "disk", "resize", "--size", "60aib").WithoutSuccessfulExit().Run()
+			})
+
+			ginkgo.It("should update config after successful resize", func() {
+				command.New(o, virtualMachineRootCmd, "disk", "resize", "--size", "60GiB").Run()
+
+				cfgBuf, err := os.ReadFile(filepath.Clean(finchConfigFilePath))
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				gomega.Expect(string(cfgBuf)).Should(gomega.ContainSubstring("datadisk: 60GiB"))
+			})
+
+			ginkgo.It("should rollback config on resize failure", func() {
+				oldConfig, err := os.ReadFile(filepath.Clean(finchConfigFilePath))
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+
+				// Start the vm so resize will fail
+				command.New(o, virtualMachineRootCmd, "start").WithTimeoutInSeconds(240).Run()
+				command.New(o, virtualMachineRootCmd, "disk", "resize", "--size", "70GiB").WithoutSuccessfulExit().Run()
+
+				newConfig, err := os.ReadFile(filepath.Clean(finchConfigFilePath))
+				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				gomega.Expect(string(newConfig)).Should(gomega.Equal(string(oldConfig)))
+			})
+		})
+	})
+}

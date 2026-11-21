@@ -1,0 +1,32 @@
+# When a third-party action is added (i.e., `uses`), please also add it to `download-licenses` in Makefile.
+on:
+  push:
+    branches:
+      - main
+name: release-please
+
+permissions:
+  contents: write # Required for trigger-release-automation job
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    timeout-minutes: 2
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+  trigger-release-automation:
+    name: Trigger release-automation.yaml if PR is merged
+    needs: [release-please]
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    permissions:
+      contents: write    # Required for uploading release assets
+      id-token: write    # Required for AWS OIDC authentication
+    secrets: inherit     # Pass all secrets to child workflows
+    uses: ./.github/workflows/release-automation.yaml

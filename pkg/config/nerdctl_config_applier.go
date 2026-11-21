@@ -1,0 +1,275 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build darwin || windows
+
+package config
+
+import (
+	"errors"
+	"fmt"
+	"path"
+	"path/filepath"
+	"strings"
+
+	toml "github.com/pelletier/go-toml"
+	"github.com/pkg/sftp"
+	"github.com/spf13/afero"
+	"github.com/spf13/afero/sftpfs"
+
+	"github.com/runfinch/finch/pkg/fssh"
+)
+
+const (
+	nerdctlNamespace      = "finch"
+	nerdctlRootfulCfgPath = "/etc/nerdctl/nerdctl.toml"
+)
+
+type nerdctlConfigApplier struct {
+	dialer           fssh.Dialer
+	fs               afero.Fs
+	privateKeyPath   string
+	finchDir         string
+	homeDir          string
+	limaInstancePath string
+	fc               *Finch
+}
+
+var _ NerdctlConfigApplier = (*nerdctlConfigApplier)(nil)
+
+// NewNerdctlApplier creates a new NerdctlConfigApplier that
+// applies nerdctl configuration changes by SSHing to the lima VM to update the nerdctl configuration file in it.
+func NewNerdctlApplier(
+	dialer fssh.Dialer,
+	fs afero.Fs,
+	privateKeyPath,
+	finchDir,
+	homeDir string,
+	limaInstancePath string,
+	fc *Finch,
+) NerdctlConfigApplier {
+	return &nerdctlConfigApplier{
+		dialer:           dialer,
+		fs:               fs,
+		privateKeyPath:   privateKeyPath,
+		finchDir:         finchDir,
+		homeDir:          homeDir,
+		limaInstancePath: limaInstancePath,
+		fc:               fc,
+	}
+}
+
+func addLineToBashrc(fs afero.Fs, profileFilePath string, profStr string, cmd string) (string, error) {
+	if !strings.Contains(profStr, cmd) {
+		profBufWithCmd := fmt.Sprintf("%s\n%s", profStr, cmd)
+		if err := afero.WriteFile(fs, profileFilePath, []byte(profBufWithCmd), 0o600); err != nil {
+			return "", fmt.Errorf("failed to write to profile file: %w", err)
+		}
+		return profBufWithCmd, nil
+	}
+	return profStr, nil
+}
+
+// updateEnvironment adds variables to the user's shell's environment. Currently it uses ~/.bashrc because
+// Bash is the default shell and Bash will not load ~/.profile if ~/.bash_profile exists (which it does).
+// ~/.bash_profile sources ~/.bashrc, so ~/.bashrc is currently the best place to define additional variables.
+// The [GNU docs for Bash] explain how these files work together in more details.
+// The default location of DOCKER_CONFIG is ~/.docker/config.json. This config change sets the location in a
+// platform-specific manner. On macOS, this is set to ~/.finch/vm-config/config.json to allow nerdctl to
+// use a custom credential helper. On Windows, the config points to ~/.finch/config.json.
+// This config change also symlinks ~/.finch in the macOS/Windows perspective (e.g. /User/<user>/.finch) to
+// ~/.finch in the vm's perspective (/home/<user>/.finch) so that it can be found in a well known location
+// that doesn't require loading the user's bash rc.
+// The reason that we don't set environment variables inside /root/.bashrc is that the vars inside it are
+// not able to be picked up even if we specify `sudo -E`. We have to switch to root user in order to access them, while
+// normally we would access the VM as the regular user.
+// For more information on the variable, see the registry nerdctl docs.
+//
+// [GNU docs for Bash]: https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html
+//
+// [registry nerdctl docs]: https://github.com/containerd/nerdctl/blob/master/docs/registry.md
+
+func updateEnvironment(fs afero.Fs, fc *Finch, finchDir, homeDir, limaVMHomeDir string) error {
+	// Platform-specific config initialization; macOs requires alternative in-VM DOCKER_CONFIG,
+	// allowing nerdctl to use a custom credential helper that sends credential operations to
+	// a credential-handling server on the host. This change was made to support macOS Keychain.
+	// Windows does not support this, and so uses the default DOCKER_CONFIG path.
+	// TODO: Update logic for "wsl2" case once wincred credential helper support is added.
+	var cmdArr []string
+	if *fc.VMType == "wsl2" {
+		cmdArr = []string{
+			`export DOCKER_CONFIG="$FINCH_DIR"`,
+		}
+	} else {
+		cmdArr = []string{
+			`mkdir -p "$HOME/.finch-vm-config"`,
+			`export DOCKER_CONFIG="$HOME/.finch-vm-config"`,
+			`echo '{"credsStore": "finchhost"}' > "$DOCKER_CONFIG/config.json"`,
+		}
+	}
+	cmdArr = append(cmdArr, `[ -L /root/.aws ] || sudo ln -fsn "$AWS_DIR" /root/.aws`)
+
+	// Credential helper configuration in-VM only necessary on Windows.
+	// TODO: Windows requires credential helper binaries to be symlinked into the VM because
+	// WSL2 cannot communicate with Windows credential stores via socket like macOS does.
+	// Consider extending the architecture to allow Windows to use socket-based credential communication
+	// similar to macOS, which would enable native Windows Credential Manager integration.
+	if *fc.VMType == "wsl2" {
+		//nolint:gosec // G101: Potential hardcoded credentials false positive
+		const configureCredHelperTemplate = `([ -e "$FINCH_DIR"/cred-helpers/docker-credential-%s ] || \
+			(echo "error: docker-credential-%s not found in $FINCH_DIR/cred-helpers directory.")) && \
+			([ -L /usr/local/bin/docker-credential-%s ] || sudo ln -s "$FINCH_DIR"/cred-helpers/docker-credential-%s /usr/local/bin)`
+
+		for _, credHelper := range fc.CredsHelpers {
+			cmdArr = append(cmdArr, fmt.Sprintf(configureCredHelperTemplate, credHelper, credHelper, credHelper, credHelper))
+		}
+	}
+
+	awsDir := fmt.Sprintf("%s/.aws", homeDir)
+
+	if *fc.VMType == "wsl2" {
+		cmdArr = append([]string{
+			fmt.Sprintf(`FINCH_DIR="$(/usr/bin/wslpath '%s')"`, finchDir),
+			fmt.Sprintf(`AWS_DIR="$(/usr/bin/wslpath '%s')"`, awsDir),
+		}, cmdArr...)
+	} else {
+		cmdArr = append([]string{
+			fmt.Sprintf(`FINCH_DIR=%s`, finchDir),
+			fmt.Sprintf(`AWS_DIR=%s`, awsDir),
+		}, cmdArr...)
+	}
+
+	// Ensure we don't end up with a double '/'
+	// Normally, we would use filepath.Join to do this, but
+	// we don't want to follow host filepath semantics. This
+	// is a linux path inside the VM.
+	limaVMFinchDir := strings.TrimRight(limaVMHomeDir, "/") + "/.finch"
+	cmdArr = append(cmdArr, fmt.Sprintf(`[ -L %s ] || ln -s $FINCH_DIR %s`, limaVMFinchDir, limaVMFinchDir))
+
+	profileFilePath := fmt.Sprintf("%s/.bashrc", limaVMHomeDir)
+	profBuf, err := afero.ReadFile(fs, profileFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file %q: %w", profileFilePath, err)
+	}
+	profStr := string(profBuf)
+	for _, element := range cmdArr {
+		profStr, err = addLineToBashrc(fs, profileFilePath, profStr, element)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// updateNerdctlConfig reads from the nerdctl config and updates values.
+func updateNerdctlConfig(fs afero.Fs, homeDir string, rootless bool) error {
+	nerdctlRootlessCfgPath := fmt.Sprintf("%s/.config/nerdctl/nerdctl.toml", homeDir)
+
+	var cfgPath string
+	if rootless {
+		cfgPath = nerdctlRootlessCfgPath
+	} else {
+		cfgPath = nerdctlRootfulCfgPath
+	}
+
+	if err := fs.MkdirAll(path.Dir(cfgPath), 0o700); err != nil {
+		return fmt.Errorf("failed to create config dir (dir(filepath)) %s: %w", cfgPath, err)
+	}
+
+	if _, err := fs.Stat(cfgPath); errors.Is(err, afero.ErrFileNotFound) {
+		if err := afero.WriteFile(fs, cfgPath, []byte{}, 0o600); err != nil {
+			return fmt.Errorf("failed to create %q with afero.WriteFile: %w", cfgPath, err)
+		}
+	}
+
+	var cfg Nerdctl
+	cfgBuf, err := afero.ReadFile(fs, cfgPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config file %q: %w", cfgPath, err)
+	}
+
+	if err := toml.Unmarshal(cfgBuf, &cfg); err != nil {
+		return fmt.Errorf("failed to unmarshal config file %q: %w", cfgPath, err)
+	}
+
+	cfg.Namespace = nerdctlNamespace
+
+	updatedCfg, err := toml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config file %q: %w", cfgPath, err)
+	}
+
+	if err := afero.WriteFile(fs, cfgPath, updatedCfg, 0o600); err != nil {
+		return fmt.Errorf("failed to write to config file %q: %w", cfgPath, err)
+	}
+
+	return nil
+}
+
+func getLimaHomeDir(localFs afero.Fs, remoteFs afero.Fs, limaInstanceDir string, cfg *Finch) (string, error) {
+	var envB []byte
+	var envErr error
+
+	if *cfg.VMType == "wsl2" {
+		envB, envErr = afero.ReadFile(localFs, filepath.Join(limaInstanceDir, "cidata", "lima.env"))
+	} else {
+		envB, envErr = afero.ReadFile(remoteFs, "/mnt/lima-cidata/lima.env")
+	}
+
+	if envErr != nil {
+		return "", envErr
+	}
+
+	var user, home string
+	lines := strings.Split(string(envB), "\n")
+	for _, l := range lines {
+		if strings.Contains(l, "LIMA_CIDATA_USER") {
+			user = strings.Split(l, "=")[1]
+		} else if strings.Contains(l, "LIMA_CIDATA_HOME") {
+			home = strings.Split(l, "=")[1]
+		}
+	}
+
+	if home != "" {
+		return home, nil
+	}
+
+	return "/home/" + user + ".linux", nil
+}
+
+// Apply gets SSH and SFTP clients and uses them to update the nerdctl config.
+func (nca *nerdctlConfigApplier) Apply(remoteAddr string) error {
+	user := "root"
+	sshCfg, err := fssh.NewClientConfig(nca.fs, user, nca.privateKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to create ssh client config: %w", err)
+	}
+
+	sshClient, err := nca.dialer.Dial("tcp", remoteAddr, sshCfg)
+	if err != nil {
+		return fmt.Errorf("failed to setup ssh client: %w", err)
+	}
+
+	sftpClient, err := sftp.NewClient(sshClient)
+	if err != nil {
+		return fmt.Errorf("failed to setup sftp client: %w", err)
+	}
+
+	sftpFs := sftpfs.New(sftpClient)
+
+	limaHomeDir, err := getLimaHomeDir(nca.fs, sftpFs, nca.limaInstancePath, nca.fc)
+	if err != nil {
+		return fmt.Errorf("failed to get lima home dir: %w", err)
+	}
+
+	// rootless hardcoded to false for now to match our finch.yaml file
+	if err := updateNerdctlConfig(sftpFs, limaHomeDir, false); err != nil {
+		return fmt.Errorf("failed to update the nerdctl config file: %w", err)
+	}
+
+	if err := updateEnvironment(sftpFs, nca.fc, nca.finchDir, nca.homeDir, limaHomeDir); err != nil {
+		return fmt.Errorf("failed to update the user's .profile file: %w", err)
+	}
+	return nil
+}

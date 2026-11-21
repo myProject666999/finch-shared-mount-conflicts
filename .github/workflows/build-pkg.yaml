@@ -1,0 +1,93 @@
+name: build-pkg
+on:
+  workflow_call:
+    inputs:
+      os:
+        type: string
+        required: true
+      arch:
+        type: string
+        required: true
+      output_arch:
+        type: string
+        required: true
+      version:
+        type: string
+        required: true
+      tag:
+        type: string
+        required: true
+      commit:
+        type: string
+        required: true
+
+permissions:
+  # This is required for configure-aws-credentials to request an OIDC JWT ID token to access AWS resources later on.
+  # More info: https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect#adding-permissions-settings
+  id-token: write
+  # This is required for actions/checkout
+  contents: read
+
+env:
+  GO_VERSION: '1.26.10'
+
+jobs:
+  build:
+    runs-on:
+      [
+        self-hosted,
+        release,
+        '${{ inputs.os }}',
+        '${{ inputs.arch }}',
+        '${{ inputs.version }}',
+      ]
+    timeout-minutes: 90
+    steps:
+      - name: Clean macOS runner workspace
+        run: |
+          setopt NULL_GLOB && rm -rf ${{ github.workspace }}/*
+        shell: zsh {0}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: true
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: Build for macOS ${{ inputs.version }} (${{ inputs.output_arch }})
+        run: |
+          brew install lz4 automake autoconf libtool yq llvm
+          git status
+          git clean -f -d
+          make clean
+          make download-licenses 
+          make FINCH_OS_IMAGE_LOCATION_ROOT=/Applications/Finch
+        shell: zsh {0}
+
+      - name: configure aws credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.ROLE }}
+          role-session-name: dependency-upload-session
+          aws-region: ${{ secrets.REGION }}
+          # The default OIDC token duration is 1 hour (3600s). The "generate pkg" step
+          # can take over 1 hour when the external code signing service is slow,
+          # causing AWS CLI calls to fail with expired credentials.
+          # Setting to 2 hours (7200s) to provide sufficient buffer.
+          role-duration-seconds: 7200
+
+      - id: final
+        name: generate pkg
+        run: |
+          ./installer-builder/tools/release-installer.sh \
+            ${{ inputs.output_arch }} \
+            ${{ inputs.tag }} \
+            ${{ secrets.INSTALLER_PRIVATE_BUCKET_NAME }} \
+            ${{ secrets.EXECUTABLE_BUCKET }} \
+            ${{ secrets.PKG_BUCKET }} \
+            ${{ secrets.NOTARIZATION_ACCOUNT }} \
+            ${{ secrets.NOTARIZATION_CREDENTIAL }}
+        shell: zsh {0}

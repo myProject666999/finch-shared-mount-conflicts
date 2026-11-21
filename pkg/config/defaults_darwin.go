@@ -1,0 +1,108 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build darwin
+
+package config
+
+import (
+	"math"
+
+	"github.com/docker/go-units"
+	"github.com/xorcare/pointer"
+
+	"github.com/runfinch/finch/pkg/command"
+	"github.com/runfinch/finch/pkg/fmemory"
+)
+
+const (
+	// 2,147,483,648 => 2GiB.
+	fallbackMemory float64 = 2_147_483_648
+	fallbackCPUs   int     = 2
+	// Default disk size is 100GiB for Lima.
+	// https://github.com/lima-vm/lima/blob/e78406086b65bea1e143e456c066d34366d6c6f7/templates/default.yaml#L45
+	// 107_374_182_400 => 100GiB.
+	fallbackBootDisk float64 = 107_374_182_400
+	// 53_687_091_200 => 50GiB.
+	fallbackDatadisk float64 = 53_687_091_200
+)
+
+func vmDefault(cfg *Finch, supportsVz bool) {
+	if cfg.VMType == nil {
+		if supportsVz {
+			cfg.VMType = pointer.String("vz")
+		} else {
+			cfg.VMType = pointer.String("qemu")
+		}
+	}
+}
+
+func rosettaDefault(cfg *Finch) {
+	if cfg.Rosetta == nil {
+		cfg.Rosetta = pointer.Bool(false)
+	}
+}
+
+func memoryDefault(cfg *Finch, mem fmemory.Memory) {
+	if cfg.Memory == nil {
+		defaultMemory := math.Round(float64(mem.TotalMemory()) * 0.5)
+		if defaultMemory >= fallbackMemory {
+			cfg.Memory = pointer.String(units.BytesSize(defaultMemory))
+		} else {
+			cfg.Memory = pointer.String(units.BytesSize(fallbackMemory))
+		}
+	}
+}
+
+func cpuDefault(cfg *Finch, deps LoadSystemDeps) {
+	if cfg.CPUs == nil {
+		defaultCPUs := int(math.Round(float64(deps.NumCPU()) * 0.5))
+		if defaultCPUs >= fallbackCPUs {
+			cfg.CPUs = pointer.Int(defaultCPUs)
+		} else {
+			cfg.CPUs = pointer.Int(fallbackCPUs)
+		}
+	}
+}
+
+func credHelperDefault(cfg *Finch) {
+	if len(cfg.CredsHelpers) == 0 {
+		cfg.CredsHelpers = []string{"osxkeychain"}
+	}
+}
+
+func bootDiskDefault(cfg *Finch) {
+	if cfg.BootDisk == nil {
+		cfg.BootDisk = pointer.String(units.BytesSize(fallbackBootDisk))
+	}
+}
+
+func dataDiskDefault(cfg *Finch) {
+	if cfg.DataDisk == nil {
+		cfg.DataDisk = pointer.String(units.BytesSize(fallbackDatadisk))
+	}
+}
+
+// applyDefaults sets default configuration options if they are not already set.
+func applyDefaults(
+	cfg *Finch,
+	deps LoadSystemDeps,
+	mem fmemory.Memory,
+	ecc command.Creator,
+) *Finch {
+	cpuDefault(cfg, deps)
+	memoryDefault(cfg, mem)
+	supportsVz := false
+	vz, err := SupportsVirtualizationFramework(ecc)
+	if err == nil && vz {
+		supportsVz = true
+	}
+	vmDefault(cfg, supportsVz)
+	rosettaDefault(cfg)
+	credHelperDefault(cfg)
+
+	bootDiskDefault(cfg)
+	dataDiskDefault(cfg)
+
+	return cfg
+}

@@ -1,0 +1,69 @@
+provision:
+  - mode: boot
+    script: |
+      systemctl stop NetworkManager-wait-online.service
+      systemctl reset-failed NetworkManager-wait-online.service
+      systemctl mask NetworkManager-wait-online.service
+  - mode: boot
+    script: |
+      modprobe virtiofs
+  # workaround for host.finch.internl and host.docker.internal not resolving inside the VM
+  - mode: system
+    script: |
+      sed -i 's/host\.lima\.internal/host.lima.internal host.docker.internal host.finch.internal/' /etc/hosts
+  # port this to common.yaml after windows socket forwarding is added
+  - mode: user
+    script: |
+      sudo cp <finch_daemon_location> /usr/local/bin/finch-daemon
+      sudo cp <finch_daemon_credhelper_location> /usr/bin/docker-credential-finch
+      sudo cp <finchhost_credhelper_location> /usr/bin/docker-credential-finchhost
+      sudo cp <finch_daemon_root>/finch@.service /usr/local/lib/systemd/system/finch@.service
+
+      sudo systemctl daemon-reload
+      sudo systemctl enable --now finch@${UID}
+
+mounts:
+  - location: "~"
+    mountPoint: null
+    writable: true
+    sshfs:
+      cache: true
+      followSymlinks: false
+      sftpDriver: "openssh-sftp-server"
+    9p:
+      securityModel: "none"
+      protocolVersion: "9p2000.L"
+      msize: "128KiB"
+      cache: "fscache"
+  - location: "/tmp/lima"
+    writable: true
+  - location: "/private"
+    writable: true
+  - location: "/var/folders"
+    writable: true
+
+ssh:
+  localPort: 0
+  loadDotSSHPubKeys: false
+  forwardAgent: true
+  forwardX11: false
+  forwardX11Trusted: false
+
+firmware:
+  legacyBIOS: false
+
+video:
+  display: "none"
+
+hostResolver:
+  hosts:
+    host.finch.internal: host.lima.internal
+    host.docker.internal: host.lima.internal
+
+portForwards:
+- guestSocket: "/run/finch.sock"
+  hostSocket: "{{.Dir}}/sock/finch.sock"
+- guestSocket: "/run/user/{{.UID}}/finch-creds.sock"
+  hostSocket: "{{.Dir}}/sock/creds.sock"
+  reverse: true
+  

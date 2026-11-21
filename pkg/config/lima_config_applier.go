@@ -107,6 +107,9 @@ type limaConfigApplier struct {
 	limaOverrideConfigPath string
 	systemDeps             LimaConfigApplierSystemDeps
 	finchConfigPath        string
+	// Platform-specific shared-mount fields (macOS only); defined in the
+	// darwin/windows build files.
+	platformMountOptions
 }
 
 var _ LimaConfigApplier = (*limaConfigApplier)(nil)
@@ -121,8 +124,9 @@ func NewLimaApplier(
 	limaOverrideConfigPath string,
 	systemDeps LimaConfigApplierSystemDeps,
 	finchConfigPath string,
+	homeDir string,
 ) LimaConfigApplier {
-	return &limaConfigApplier{
+	applier := &limaConfigApplier{
 		cfg:                    cfg,
 		cmdCreator:             cmdCreator,
 		fs:                     fs,
@@ -131,6 +135,8 @@ func NewLimaApplier(
 		systemDeps:             systemDeps,
 		finchConfigPath:        finchConfigPath,
 	}
+	applyPlatformMountOptions(applier, homeDir)
+	return applier
 }
 
 // ConfigureDefaultLimaYaml writes Lima-specific config values from Finch's config to default.yaml at lima config file path.

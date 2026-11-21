@@ -113,9 +113,16 @@ func (lca *limaConfigApplier) configureMemory(limaCfg *limatype.LimaYAML) *limat
 func (lca *limaConfigApplier) configureMounts(limaCfg *limatype.LimaYAML) *limatype.LimaYAML {
 	limaCfg.Mounts = []limatype.Mount{}
 	for _, ad := range lca.cfg.AdditionalDirectories {
-		limaCfg.Mounts = append(limaCfg.Mounts, limatype.Mount{
-			Location: *ad.Path, Writable: pointer.Bool(true),
-		})
+		mount := limatype.Mount{
+			Location: *ad.Path,
+			// Historical behavior is read-write; an explicit writable:false
+			// produces a read-only mount.
+			Writable: pointer.Bool(ad.Writable == nil || *ad.Writable),
+		}
+		if ad.MountPoint != nil && *ad.MountPoint != "" {
+			mount.MountPoint = pointer.String(*ad.MountPoint)
+		}
+		limaCfg.Mounts = append(limaCfg.Mounts, mount)
 	}
 	return limaCfg
 }

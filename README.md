@@ -181,10 +181,20 @@ creds_helpers:
 # For example, if you want to mount a directory into a container, and that directory is not under your home directory, 
 # then you'll need to specify this field to add that directory or any ascendant of it as a work directory. (optional)
 # Note: If your username doesn't match your home directory name, you may need to add '/Users/<username>' here to avoid permission issues.
+# Finch validates these entries on `finch vm init` and every `finch vm start`: declarations that would leave a
+# directory's read/write permission ambiguous (for example the same directory shared both read-only and read-write,
+# or two host directories mapped to one guest path) block startup. See
+# docs/design/shared_directory_conflict_checks.md for the full decision table.
 additional_directories:
   # the path of each additional directory.
   # - path: /Users/<username>  # Uncomment and replace <username> if needed
   - path: /Volumes
+    # writable: true mounts the directory read-write (the historical default when omitted);
+    # false mounts it read-only inside the VM. (optional)
+    writable: true
+    # mountPoint: the path inside the guest. Defaults to the host path when omitted.
+    # Mapping two different host directories to the same mountPoint is rejected. (optional)
+    # mountPoint: /Volumes
 
 # vmType: sets which Hypervisor to use to launch the VM. (optional)
 # Only takes effect when a new VM is launched (only on vm init).

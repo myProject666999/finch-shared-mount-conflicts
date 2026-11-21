@@ -71,6 +71,13 @@ func (sva *startVMAction) run() error {
 	if err != nil {
 		return err
 	}
+
+	// Re-validate on every start, not just init: a config edit after the VM
+	// was last stopped must be checked before Lima regenerates its mounts.
+	if err := sva.limaConfigApplier.ValidateSharedMounts(sva.logger); err != nil {
+		return err
+	}
+
 	err = dependency.InstallOptionalDeps(sva.optionalDepGroups, sva.logger)
 	if err != nil {
 		sva.logger.Errorf("Dependency error: %v", err)
@@ -97,6 +104,10 @@ func (sva *startVMAction) run() error {
 		return err
 	}
 	sva.logger.Info("Finch virtual machine started successfully")
+
+	if err := sva.limaConfigApplier.PersistSharedMountSnapshot(); err != nil {
+		sva.logger.Warnf("failed to save shared-directory snapshot: %v", err)
+	}
 	return nil
 }
 

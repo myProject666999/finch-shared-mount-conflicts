@@ -83,6 +83,12 @@ func (iva *initVMAction) run() error {
 		return err
 	}
 
+	// Reject ambiguous shared-directory declarations before touching Lima
+	// config or starting the VM, so permission conflicts fail fast.
+	if err := iva.limaConfigApplier.ValidateSharedMounts(iva.logger); err != nil {
+		return err
+	}
+
 	err = iva.limaConfigApplier.ConfigureDefaultLimaYaml(iva.logger)
 	if err != nil {
 		return err
@@ -139,6 +145,14 @@ func (iva *initVMAction) run() error {
 		"does not create a security boundary and exists for the sole purpose of running Linux containers on macOS and Windows.")
 
 	iva.logger.Info("Finch virtual machine started successfully")
+
+	// Record the declarations that are now in effect so the next start can
+	// tell existing entries from newly added ones. A failure here must not
+	// fail the command itself: a missing snapshot only degrades conflict
+	// reporting on the next run.
+	if err := iva.limaConfigApplier.PersistSharedMountSnapshot(); err != nil {
+		iva.logger.Warnf("failed to save shared-directory snapshot: %v", err)
+	}
 	return nil
 }
 

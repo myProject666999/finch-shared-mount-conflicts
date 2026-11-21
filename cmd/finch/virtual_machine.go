@@ -20,6 +20,7 @@ import (
 	"github.com/runfinch/finch/pkg/config"
 	credserver "github.com/runfinch/finch/pkg/credserver"
 	"github.com/runfinch/finch/pkg/flog"
+	"github.com/runfinch/finch/pkg/lima"
 	"github.com/runfinch/finch/pkg/path"
 
 	"github.com/spf13/afero"
@@ -122,6 +123,7 @@ func buildVMDependencies(
 			fp.LimaOverrideConfigPath(),
 			system.NewStdLib(),
 			fp.ConfigFilePath(finchRootPath),
+			home,
 		),
 		nca: config.NewNerdctlApplier(
 			fssh.NewDialer(),
@@ -147,7 +149,7 @@ func virtualMachineCommands(
 	finchRootPath string,
 ) *cobra.Command {
 	deps := buildVMDependencies(logger, fp, ncc, ecc, fs, fc, home, finchRootPath)
-	return newVirtualMachineCommand(
+	cmd := newVirtualMachineCommand(
 		ncc,
 		logger,
 		deps.optionalDepGroups,
@@ -158,4 +160,28 @@ func virtualMachineCommands(
 		deps.diskManager,
 		fc,
 	)
+
+	// When the VM is already running, a conflicting config edit must not be
+	// force-applied (mounts cannot change under a running guest); surface it
+	// as a warning instead and let the next init/start enforce the hard check.
+	cmd.PersistentPreRunE = func(_ *cobra.Command, _ []string) error {
+		warnIfRunningVMHasMountConflicts(logger, ncc, deps.lca)
+		return nil
+	}
+	return cmd
+}
+
+// warnIfRunningVMHasMountConflicts logs, but never returns, shared-directory
+// conflicts while the VM is running. It deliberately swallows status errors:
+// a warning path must never block an unrelated command.
+func warnIfRunningVMHasMountConflicts(logger flog.Logger, ncc command.NerdctlCmdCreator, lca config.LimaConfigApplier) {
+	status, err := lima.GetVMStatus(ncc, logger, limaInstanceName)
+	if err != nil || status != lima.Running {
+		return
+	}
+	if validateErr := lca.ValidateSharedMounts(logger); validateErr != nil {
+		logger.Warnln("the shared-directory configuration has conflicts that will block the next VM start; " +
+			"the running VM is left untouched:")
+		logger.Warnln(validateErr.Error())
+	}
 }

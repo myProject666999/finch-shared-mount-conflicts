@@ -75,6 +75,7 @@ func TestInitVMAction_runAdapter(t *testing.T) {
 				logger.EXPECT().Debugf("Status of virtual machine: %s", "")
 
 				command := mocks.NewCommand(ctrl)
+				lca.EXPECT().ValidateSharedMounts(logger).Return(nil)
 				lca.EXPECT().ConfigureDefaultLimaYaml(logger).Return(nil)
 				lca.EXPECT().ConfigureOverrideLimaYaml().Return(nil)
 				dm.EXPECT().DetachUserDataDisk().Return(nil)
@@ -93,6 +94,7 @@ func TestInitVMAction_runAdapter(t *testing.T) {
 					"especially one running multi-tenant workloads. The virtual machine that Finch manages on macOS and Windows " +
 					"does not create a security boundary and exists for the sole purpose of running Linux containers on macOS and Windows.")
 				logger.EXPECT().Info("Finch virtual machine started successfully")
+				lca.EXPECT().PersistSharedMountSnapshot().Return(nil)
 			},
 		},
 	}
@@ -148,6 +150,7 @@ func TestInitVMAction_run(t *testing.T) {
 				getVMStatusC.EXPECT().Output().Return([]byte(""), nil)
 				logger.EXPECT().Debugf("Status of virtual machine: %s", "")
 
+				lca.EXPECT().ValidateSharedMounts(logger).Return(nil)
 				lca.EXPECT().ConfigureDefaultLimaYaml(logger).Return(nil)
 				lca.EXPECT().ConfigureOverrideLimaYaml().Return(nil)
 				dm.EXPECT().DetachUserDataDisk().Return(nil)
@@ -168,6 +171,7 @@ func TestInitVMAction_run(t *testing.T) {
 					"especially one running multi-tenant workloads. The virtual machine that Finch manages on macOS and Windows " +
 					"does not create a security boundary and exists for the sole purpose of running Linux containers on macOS and Windows.")
 				logger.EXPECT().Info("Finch virtual machine started successfully")
+				lca.EXPECT().PersistSharedMountSnapshot().Return(nil)
 			},
 		},
 		{
@@ -275,6 +279,7 @@ func TestInitVMAction_run(t *testing.T) {
 				getVMStatusC.EXPECT().Output().Return([]byte(""), nil)
 				logger.EXPECT().Debugf("Status of virtual machine: %s", "")
 
+				lca.EXPECT().ValidateSharedMounts(logger).Return(nil)
 				lca.EXPECT().ConfigureDefaultLimaYaml(logger).Return(nil)
 				lca.EXPECT().ConfigureOverrideLimaYaml().Return(nil)
 
@@ -301,6 +306,7 @@ func TestInitVMAction_run(t *testing.T) {
 					"especially one running multi-tenant workloads. The virtual machine that Finch manages on macOS and Windows " +
 					"does not create a security boundary and exists for the sole purpose of running Linux containers on macOS and Windows.")
 				logger.EXPECT().Info("Finch virtual machine started successfully")
+				lca.EXPECT().PersistSharedMountSnapshot().Return(nil)
 			},
 		},
 		{
@@ -345,6 +351,7 @@ func TestInitVMAction_run(t *testing.T) {
 				getVMStatusC.EXPECT().Output().Return([]byte(""), nil)
 				logger.EXPECT().Debugf("Status of virtual machine: %s", "")
 
+				lca.EXPECT().ValidateSharedMounts(logger).Return(nil)
 				lca.EXPECT().ConfigureDefaultLimaYaml(logger).Return(nil)
 				lca.EXPECT().ConfigureOverrideLimaYaml().Return(nil)
 				dm.EXPECT().DetachUserDataDisk().Return(nil)

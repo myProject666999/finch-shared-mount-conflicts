@@ -73,6 +73,7 @@ func TestStartVMAction_runAdapter(t *testing.T) {
 				getVMStatusC.EXPECT().Output().Return([]byte("Stopped"), nil)
 				logger.EXPECT().Debugf("Status of virtual machine: %s", "Stopped")
 
+				lca.EXPECT().ValidateSharedMounts(logger).Return(nil)
 				lca.EXPECT().ConfigureOverrideLimaYaml().Return(nil)
 
 				dm.EXPECT().EnsureUserDataDisk().Return(nil)
@@ -83,6 +84,7 @@ func TestStartVMAction_runAdapter(t *testing.T) {
 
 				logger.EXPECT().Info("Starting existing Finch virtual machine...")
 				logger.EXPECT().Info("Finch virtual machine started successfully")
+				lca.EXPECT().PersistSharedMountSnapshot().Return(nil)
 			},
 		},
 	}
@@ -147,6 +149,7 @@ func TestStartVMAction_run(t *testing.T) {
 				getVMStatusC.EXPECT().Output().Return([]byte("Stopped"), nil)
 				logger.EXPECT().Debugf("Status of virtual machine: %s", "Stopped")
 
+				lca.EXPECT().ValidateSharedMounts(logger).Return(nil)
 				lca.EXPECT().ConfigureOverrideLimaYaml().Return(nil)
 
 				dm.EXPECT().EnsureUserDataDisk().Return(nil)
@@ -157,6 +160,7 @@ func TestStartVMAction_run(t *testing.T) {
 
 				logger.EXPECT().Info("Starting existing Finch virtual machine...")
 				logger.EXPECT().Info("Finch virtual machine started successfully")
+				lca.EXPECT().PersistSharedMountSnapshot().Return(nil)
 			},
 		},
 		{
@@ -287,6 +291,7 @@ func TestStartVMAction_run(t *testing.T) {
 				getVMStatusC.EXPECT().Output().Return([]byte("Stopped"), nil)
 				logger.EXPECT().Debugf("Status of virtual machine: %s", "Stopped")
 
+				lca.EXPECT().ValidateSharedMounts(logger).Return(nil)
 				lca.EXPECT().ConfigureOverrideLimaYaml().Return(nil)
 
 				dm.EXPECT().EnsureUserDataDisk().Return(nil)
@@ -297,6 +302,7 @@ func TestStartVMAction_run(t *testing.T) {
 
 				logger.EXPECT().Info("Starting existing Finch virtual machine...")
 				logger.EXPECT().Info("Finch virtual machine started successfully")
+				lca.EXPECT().PersistSharedMountSnapshot().Return(nil)
 
 				logger.EXPECT().Errorf("Dependency error: %v",
 					fmt.Errorf("failed to install dependencies: %w",
@@ -329,6 +335,7 @@ func TestStartVMAction_run(t *testing.T) {
 				getVMStatusC.EXPECT().Output().Return([]byte("Stopped"), nil)
 				logger.EXPECT().Debugf("Status of virtual machine: %s", "Stopped")
 
+				lca.EXPECT().ValidateSharedMounts(logger).Return(nil)
 				lca.EXPECT().ConfigureOverrideLimaYaml().Return(nil)
 
 				dm.EXPECT().EnsureUserDataDisk().Return(nil)

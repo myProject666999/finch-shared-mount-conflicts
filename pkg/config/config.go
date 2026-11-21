@@ -27,6 +27,15 @@ import (
 // AdditionalDirectory represents the additional directory used in Finch config.
 type AdditionalDirectory struct {
 	Path *string `yaml:"path"`
+	// Writable controls whether the directory is mounted read-write (true) or
+	// read-only (false) inside the VM. It is a pointer so a missing field
+	// keeps the historical behavior (read-write) after applyDefaults, while
+	// still allowing the conflict checker to distinguish an explicit choice.
+	Writable *bool `yaml:"writable,omitempty"`
+	// MountPoint is the path inside the guest. When empty Lima mounts the
+	// directory at the same path as the host, which is also what the conflict
+	// checker assumes before comparison.
+	MountPoint *string `yaml:"mountPoint,omitempty"`
 }
 
 // SharedSystemSettings represents all settings shared by virtualized Finch configurations.
@@ -97,6 +106,14 @@ type LimaConfigApplier interface {
 	ConfigureOverrideLimaYaml() error
 	ConfigureDefaultLimaYaml(logger flog.Logger) error
 	GetFinchConfigPath() string
+	// ValidateSharedMounts runs the shared-directory conflict check. It is
+	// invoked on vm init and every vm start, before any Lima config is
+	// written, so an ambiguous declaration blocks startup early.
+	ValidateSharedMounts(logger flog.Logger) error
+	// PersistSharedMountSnapshot records the declarations after a
+	// successful start so the next check can distinguish existing entries
+	// from newly added ones.
+	PersistSharedMountSnapshot() error
 }
 
 // NerdctlConfigApplier applies nerdctl configuration changes.

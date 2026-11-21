@@ -638,7 +638,7 @@ mountType: "reverse-sshfs"`), 0o600)
 					Memory:                pointer.String("2GiB"),
 					CPUs:                  pointer.Int(4),
 					Rosetta:               pointer.Bool(false),
-					AdditionalDirectories: []AdditionalDirectory{{pointer.String("/Volumes")}},
+					AdditionalDirectories: []AdditionalDirectory{{Path: pointer.String("/Volumes")}},
 					SharedSystemSettings: SharedSystemSettings{
 						VMType: pointer.String("qemu"),
 					},
@@ -745,6 +745,7 @@ mountType: "reverse-sshfs"`), 0o600)
 					tc.overridePath,
 					deps,
 					finchConfigPath,
+					"/Users/test-user",
 				).ConfigureDefaultLimaYaml(l)
 				_ = NewLimaApplier(
 					tc.config,
@@ -754,6 +755,7 @@ mountType: "reverse-sshfs"`), 0o600)
 					tc.overridePath,
 					deps,
 					finchConfigPath,
+					"/Users/test-user",
 				).ConfigureOverrideLimaYaml()
 			} else {
 				got = NewLimaApplier(
@@ -764,6 +766,7 @@ mountType: "reverse-sshfs"`), 0o600)
 					tc.overridePath,
 					deps,
 					finchConfigPath,
+					"/Users/test-user",
 				).ConfigureOverrideLimaYaml()
 			}
 
